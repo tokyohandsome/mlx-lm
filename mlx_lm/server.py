@@ -693,6 +693,12 @@ class APIHandler(BaseHTTPRequestHandler):
         ):
             logging.debug(gen_response.text)
 
+            # --- Added from here ---
+            if not gen_response.text:
+                logging.debug("Skipping empty token.")
+                continue
+            # --- to here ---
+
             if (
                 self.tokenizer.has_tool_calling
                 and gen_response.text == self.tokenizer.tool_call_start
@@ -835,7 +841,41 @@ class APIHandler(BaseHTTPRequestHandler):
         self.object_type = "chat.completion.chunk" if self.stream else "chat.completion"
         if self.tokenizer.chat_template:
             messages = body["messages"]
+
+            # --- Changes from here ---
+            # Modify message based on the `mlx-lm` chat template.
+            for message in messages:
+                if message["role"] == "assistant":
+                    content = message.get("content", "")
+                    if "<|channel|>analysis<|message|>" in content and "<|channel|>final<|message|>" in content:
+                        try:
+                            analysis_start_tag = "<|channel|>analysis<|message|>"
+                            analysis_end_tag = "<|end|>"
+                            final_start_tag = "<|channel|>final<|message|>"
+
+                            analysis_start = content.find(analysis_start_tag) + len(analysis_start_tag)
+                            analysis_end = content.find(analysis_end_tag)
+                            final_start = content.find(final_start_tag) + len(final_start_tag)
+
+                            analysis = content[analysis_start:analysis_end].strip()
+                            final = content[final_start:].strip()
+
+                            message["content"] = final
+                            message["thinking"] = analysis
+                        except Exception as e:
+                            logging.error(f"Failed to parse assistant message with analysis/final tags: {e}")
+                            # If parsing fails, leave the content and empty thinking
+                            message["thinking"] = ""
+            # --- to here ---
+
             process_message_content(messages)
+
+            # Moved response_format before `apply_chat_template`
+            if body.get("response_format", {}).get("type") == "json_object":
+                if self.tokenizer.chat_template is None:
+                    raise ValueError("JSON response format requested, but tokenizer has no chat template. Consider using `--use-default-chat-template`")
+                messages.append({"role": "user", "content": self.tokenizer.json_schema_prompt})
+
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 body.get("tools") or None,
